@@ -596,30 +596,34 @@ class IBKRClient:
         "DayTradesRemaining"
     )
 
-    def _account_summary_bounded(self, timeout: float = 6.0) -> List[Any]:
+    def _account_summary_bounded(self, timeout: float = 5.0) -> List[Any]:
         """Return account summary values without blocking forever.
 
         ib_insync's ``accountSummary()`` waits for ``AccountSummaryEnd`` with no
-        timeout. On multi-account logins TWS sometimes never sends it, which
-        made HTTP requests (account overview / IBKR panel) hang until the client
-        gave up. Request the tags directly and harvest whatever arrived within
-        the deadline; cached values are reused once populated.
+        timeout; on multi-account logins TWS may never send it and the HTTP
+        request hangs. Request the tags directly, then harvest rows until the
+        target account reports NetLiquidation/BuyingPower or the deadline hits.
         """
         ib = self._ib
+        wrapper = getattr(ib, "wrapper", None)
 
-        def _cached():
-            values = list(getattr(getattr(ib, "wrapper", None), "acctSummary", {}).values())
-            if self._account:
-                values = [v for v in values if str(getattr(v, "account", "")) == self._account]
-            return values
+        def _all_values():
+            try:
+                return list(getattr(wrapper, "acctSummary", {}).values())
+            except Exception:  # noqa: BLE001
+                return []
 
-        cached = []
+        def _for_target(values):
+            if not self._account:
+                return list(values)
+            return [v for v in values if str(getattr(v, "account", "")) == self._account]
+
+        wanted = {"NetLiquidation", "BuyingPower"}
         try:
-            cached = _cached()
+            if wanted & {str(getattr(v, "tag", "")) for v in _for_target(_all_values())}:
+                return _for_target(_all_values())
         except Exception:  # noqa: BLE001
-            cached = []
-        if cached:
-            return cached
+            pass
 
         try:
             ib.client.reqAccountSummary(1, "All", self._SUMMARY_TAGS)
@@ -628,19 +632,17 @@ class IBKRClient:
             return []
 
         deadline = time.monotonic() + max(1.0, float(timeout))
-        values: List[Any] = []
         while time.monotonic() < deadline:
             try:
-                ib.waitOnUpdate(timeout=0.5)
+                ib.waitOnUpdate(timeout=0.4)
             except Exception:  # noqa: BLE001
                 break
-            try:
-                values = _cached()
-            except Exception:  # noqa: BLE001
-                values = []
-            if values:
-                break
-        return values
+            rows = _for_target(_all_values())
+            if wanted & {str(getattr(v, "tag", "")) for v in rows}:
+                return rows
+
+        # Last chance: whatever the target account produced.
+        return _for_target(_all_values())
 
     def get_account_summary(self) -> Dict[str, Any]:
         """
