@@ -509,6 +509,18 @@ class PendingOrderPositionSyncMixin:
                     logger.debug(f"[PositionSync] Strategy {sid} skipped: exchange_id is empty (signal mode or no exchange config)")
                     continue
 
+                if exchange_id == "ibkr":
+                    # Dedicated IBKR session for reconciliation: the strategy order client
+                    # already holds the credential's clientId, and TWS allows only one
+                    # session per clientId. Without this the sync client could not connect
+                    # and live strategies were auto-stopped ("position_sync_client").
+                    try:
+                        exchange_config["ibkr_client_id"] = int(
+                            os.getenv("IBKR_SYNC_CLIENT_ID", "34") or 34
+                        )
+                    except (TypeError, ValueError):
+                        exchange_config["ibkr_client_id"] = 34
+
                 market_type = (sc.get("market_type") or exchange_config.get("market_type") or "swap")
                 market_type = str(market_type or "swap").strip().lower()
                 if market_type in ("futures", "future", "perp", "perpetual"):
