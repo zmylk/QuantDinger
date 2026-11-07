@@ -631,7 +631,9 @@ class IBKRClient:
                 return list(values)
             return [v for v in values if str(getattr(v, "account", "")) == self._account]
 
-        wanted = {"NetLiquidation", "BuyingPower"}
+        # NetLiquidation can arrive last on some TWS builds; require it so the
+        # KPI card never renders a half-filled summary.
+        wanted = {"NetLiquidation"}
         try:
             if wanted & {str(getattr(v, "tag", "")) for v in _for_target(_all_values())}:
                 return _for_target(_all_values())
