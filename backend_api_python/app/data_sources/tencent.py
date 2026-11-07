@@ -9,6 +9,7 @@ This is used as a stable alternative when Yahoo/yfinance gets rate-limited.
 """
 
 from __future__ import annotations
+import re
 
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -193,7 +194,7 @@ def tencent_kline_rows_to_dicts(rows: List[Any]) -> List[Dict[str, Any]]:
 
 
 @retry_with_backoff(max_attempts=3, base_delay=1.2, max_delay=8.0, exceptions=(Exception,))
-def fetch_kline(code: str, period: str, count: int = 300, adj: str = "qfq", timeout: int = 10) -> List[List[str]]:
+def _fetch_kline_tencent(code: str, period: str, count: int = 300, adj: str = "qfq", timeout: int = 10) -> List[List[str]]:
     """
     Fetch kline arrays from Tencent.
 
@@ -240,3 +241,58 @@ def fetch_kline(code: str, period: str, count: int = 300, adj: str = "qfq", time
             return v
     return []
 
+
+
+# ---------------------------------------------------------------------------
+# Local patch (qdcnfix): Tencent's kline endpoint answers HTTP 501 + bot
+# challenge to datacenter IPs, so try Eastmoney's public kline API first.
+# ---------------------------------------------------------------------------
+_EM_KLT = {"day": "101", "week": "102", "month": "103"}
+_EM_FQT = {"": "0", "qfq": "1", "hfq": "2"}
+_EM_SECID_PREFIX = {"sh": "1", "sz": "0", "bj": "0"}
+
+
+def _fetch_eastmoney_kline(code: str, period: str, count: int = 300, adj: str = "qfq", timeout: int = 10) -> List[List[str]]:
+    m = re.match(r"^(sh|sz|bj)(\d{6})$", str(code).lower())
+    klt = _EM_KLT.get(str(period).lower())
+    if not m or not klt:
+        return []
+    secid = "%s.%s" % (_EM_SECID_PREFIX[m.group(1)], m.group(2))
+    params = {
+        "secid": secid,
+        "fields1": "f1,f2,f3,f4,f5",
+        "fields2": "f51,f52,f53,f54,f55,f56",
+        "klt": klt,
+        "fqt": _EM_FQT.get(str(adj or ""), "1"),
+        "lmt": str(int(count)),
+        "end": "20500101",
+    }
+    with requests.get(
+        "https://push2his.eastmoney.com/api/qt/stock/kline/get",
+        params=params,
+        headers=get_request_headers(referer="https://quote.eastmoney.com/"),
+        timeout=timeout,
+    ) as resp:
+        resp.raise_for_status()
+        payload = resp.json() if resp.text else {}
+    rows = (((payload or {}).get("data") or {}).get("klines") or [])
+    return [str(row).split(",")[:6] for row in rows]
+
+
+def fetch_kline(code: str, period: str, count: int = 300, adj: str = "qfq", timeout: int = 10) -> List[List[str]]:
+    """Kline for CN/HK symbols (qdcnfix): Eastmoney first, Tencent as fallback."""
+    c = _lower_code(code)
+    if not c:
+        return []
+    try:
+        rows = _fetch_eastmoney_kline(c, period, count, adj, timeout)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Eastmoney kline failed (%s); falling back to Tencent", exc)
+        rows = []
+    if rows:
+        return rows
+    try:
+        return _fetch_kline_tencent(c, period, count, adj, timeout)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Tencent kline fallback failed: %s", exc)
+        return []

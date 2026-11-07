@@ -5,6 +5,7 @@ Used by broker-accounts UI (not strategy L3 ledger).
 
 from __future__ import annotations
 
+import os
 import time
 import math
 from typing import Any, Dict, List, Tuple
@@ -685,6 +686,59 @@ def _fetch_alpaca_snapshot(exchange_config: Dict[str, Any], errors: List[str]) -
     return [], positions, orders
 
 
+
+def _fetch_ibkr_snapshot(
+    exchange_config: Dict[str, Any],
+    errors: List[str],
+) -> Tuple[List[Dict], List[Dict], List[Dict]]:
+    """qdcnfix: one IBKR session -> positions + open orders (no clientId reuse)."""
+    spot: List[Dict[str, Any]] = []
+    orders: List[Dict[str, Any]] = []
+    client = None
+    try:
+        client = create_client(exchange_config, market_type="spot")
+        if client is None or not bool(getattr(client, "connect")()):
+            raise RuntimeError("IBKR connect failed")
+        for pos in client.get_positions() or []:
+            try:
+                qty = float(pos.get("quantity") or 0)
+            except (TypeError, ValueError):
+                continue
+            if not qty:
+                continue
+            try:
+                entry = float(pos.get("avgCost") or 0)
+            except (TypeError, ValueError):
+                entry = 0.0
+            spot.append({
+                "symbol": str(pos.get("symbol") or pos.get("ib_symbol") or ""),
+                "side": "long" if qty > 0 else "short",
+                "size": abs(qty),
+                "entry_price": entry,
+                "mark_price": 0,
+                "unrealized_pnl": 0,
+                "market_type": "spot",
+                "exchange_id": "ibkr",
+            })
+        try:
+            for item in client.get_open_orders() or []:
+                row = dict(item or {})
+                row.setdefault("market_type", "spot")
+                row.setdefault("exchange_id", "ibkr")
+                orders.append(row)
+        except Exception as exc:  # noqa: BLE001
+            _append_snapshot_error(errors, exc, context="IBKR 挂单")
+    except Exception as exc:  # noqa: BLE001
+        _append_snapshot_error(errors, exc, context="IBKR 账户连接")
+    finally:
+        try:
+            if client is not None and hasattr(client, "disconnect"):
+                client.disconnect()
+        except Exception:  # noqa: BLE001
+            pass
+    return [], spot, orders
+
+
 def fetch_account_snapshot(*, user_id: int, credential_id: int) -> Dict[str, Any]:
     """Live fetch swap/spot legs + open orders for one credential."""
     cred = int(credential_id or 0)
@@ -700,6 +754,14 @@ def fetch_account_snapshot(*, user_id: int, credential_id: int) -> Dict[str, Any
         }
     exchange_config = resolve_exchange_config({"credential_id": cred}, user_id=int(user_id))
     exchange_id = str(exchange_config.get("exchange_id") or "").strip().lower()
+    if exchange_id == "ibkr":
+        # qdcnfix: the snapshot used the credential's own clientId, which the running
+        # strategy already holds (TWS allows one session per clientId), so the UI
+        # account panel could never connect. Use a dedicated id by default.
+        try:
+            exchange_config["ibkr_client_id"] = int(os.getenv("IBKR_SNAPSHOT_CLIENT_ID", "33") or 33)
+        except (TypeError, ValueError):
+            exchange_config["ibkr_client_id"] = 33
     if not exchange_id:
         return {
             "swap_positions": [],
@@ -716,6 +778,11 @@ def fetch_account_snapshot(*, user_id: int, credential_id: int) -> Dict[str, Any
 
     if exchange_id == "alpaca":
         sp, st, od = _fetch_alpaca_snapshot(exchange_config, errors)
+        swap_all.extend(sp)
+        spot_all.extend(st)
+        orders_all.extend(od)
+    elif exchange_id == "ibkr":
+        sp, st, od = _fetch_ibkr_snapshot(exchange_config, errors)
         swap_all.extend(sp)
         spot_all.extend(st)
         orders_all.extend(od)

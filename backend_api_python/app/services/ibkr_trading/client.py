@@ -599,16 +599,54 @@ class IBKRClient:
             
             summary = self._ib.accountSummary(self._account)
             result = {}
+            rows = []
             for item in summary:
-                result[item.tag] = {
-                    "value": item.value,
-                    "currency": item.currency
-                }
-            
+                tag = str(item.tag)
+                cur = str(item.currency or "")
+                rows.append((tag, cur, item.value))
+                prev = result.get(tag)
+                # qdcnfix: a tag can repeat once per currency; keep the base (USD) row
+                if prev is None or (
+                    cur.upper() == "USD" and str(prev.get("currency") or "").upper() != "USD"
+                ):
+                    result[tag] = {"value": item.value, "currency": cur}
+
+            def _num(tag):
+                candidates = [(cur, val) for (t, cur, val) in rows if t == tag]
+                if not candidates:
+                    item = result.get(tag)
+                    if not isinstance(item, dict):
+                        return None
+                    candidates = [("", item.get("value"))]
+                preferred = [c for c in candidates if str(c[0]).upper() in ("USD", "")]
+                chosen = (preferred or candidates)[0]
+                try:
+                    return float(str(chosen[1]).strip())
+                except (TypeError, ValueError):
+                    return None
+
+            _buying_power = _num("BuyingPower")
+            _net_liq = _num("NetLiquidation")
+            _cash = _num("TotalCashValue")
+            _available = _num("AvailableFunds")
+            _cur = "USD" if any(str(c).upper() == "USD" for (_, c, _v) in rows) else ""
+
             return {
                 "account": self._account,
                 "summary": result,
-                "success": True
+                "success": True,
+                # qdcnfix: flat aliases for UI balance widgets (buying power / equity / cash)
+                "buying_power": _buying_power,
+                "buyingPower": _buying_power,
+                "cash": _cash,
+                "available_funds": _available,
+                "availableFunds": _available,
+                "equity": _net_liq,
+                "portfolio_value": _net_liq,
+                "portfolioValue": _net_liq,
+                "net_liquidation": _net_liq,
+                "NetLiquidation": _net_liq,
+                "currency": _cur or "USD",
             }
             
         except Exception as e:
