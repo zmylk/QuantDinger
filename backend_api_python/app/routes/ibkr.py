@@ -60,6 +60,26 @@ def _require_connected_client():
     return client, None
 
 
+
+def _first_ibkr_credential_id():
+    """Return the most recent IBKR credential id for the current user."""
+    try:
+        from app.utils.db import get_db_connection
+
+        with get_db_connection() as db:
+            cur = db.cursor()
+            cur.execute(
+                "SELECT id FROM qd_exchange_credentials "
+                "WHERE user_id = %s AND exchange_id = %s ORDER BY id DESC LIMIT 1",
+                (int(getattr(g, "user_id", 0) or 0), "ibkr"),
+            )
+            row = cur.fetchone() or {}
+            cur.close()
+        return int(row.get("id") or 0) or None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("resolve default IBKR credential failed: %s", exc)
+        return None
+
 def _ephemeral_client_from_credential():
     """Build a short-lived IBKR session from ?credential_id=.
 
@@ -69,6 +89,11 @@ def _ephemeral_client_from_credential():
     never evicts the strategy/order session.
     """
     cred_id = request.args.get('credential_id', type=int)
+    if not cred_id:
+        # The broker-accounts page calls /orders and /account without a
+        # credential_id once a session exists; when it has none (fresh page,
+        # no manual connect) fall back to the user's IBKR credential.
+        cred_id = _first_ibkr_credential_id()
     if not cred_id:
         return None
     try:
