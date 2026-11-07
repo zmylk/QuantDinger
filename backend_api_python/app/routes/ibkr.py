@@ -8,7 +8,9 @@ Multi-tenancy: connections are isolated per authenticated user via
 through someone else's IBKR/TWS account.
 """
 
-from flask import jsonify, request
+import os
+
+from flask import g, jsonify, request
 from app.openapi.blueprint import HumanBlueprint as Blueprint
 from app.utils.auth import login_required
 
@@ -56,6 +58,39 @@ def _require_connected_client():
     if client is None or not client.connected:
         return None, (jsonify({"success": False, "error": "Not connected to IBKR"}), 400)
     return client, None
+
+
+def _ephemeral_client_from_credential():
+    """Build a short-lived IBKR session from ?credential_id=.
+
+    The broker-accounts UI loads the account overview without pressing "connect"
+    first, so the per-user session is usually empty. Falling back to the saved
+    credential keeps that page working while using a dedicated clientId so it
+    never evicts the strategy/order session.
+    """
+    cred_id = request.args.get('credential_id', type=int)
+    if not cred_id:
+        return None
+    try:
+        from app.services.exchange_execution import resolve_exchange_config
+        from app.services.live_trading.factory import create_client
+
+        cfg = resolve_exchange_config(
+            {"credential_id": int(cred_id)}, user_id=int(getattr(g, "user_id", 0) or 0)
+        )
+        if str(cfg.get("exchange_id") or "").strip().lower() != "ibkr":
+            return None
+        try:
+            cfg["ibkr_client_id"] = int(os.getenv("IBKR_UI_CLIENT_ID", "35") or 35)
+        except (TypeError, ValueError):
+            cfg["ibkr_client_id"] = 35
+        client = create_client(cfg, market_type="spot")
+        if not client.connect():
+            return None
+        return client
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ephemeral IBKR session failed: %s", exc)
+        return None
 
 
 # ==================== Connection Management ====================
@@ -166,7 +201,19 @@ def get_account():
     try:
         client, err = _require_connected_client()
         if err is not None:
-            return err
+            ephemeral = _ephemeral_client_from_credential()
+            if ephemeral is None:
+                return err
+            try:
+                return jsonify({
+                    "success": True,
+                    "data": ephemeral.get_account_summary()
+                })
+            finally:
+                try:
+                    ephemeral.disconnect()
+                except Exception:  # noqa: BLE001
+                    pass
 
         return jsonify({
             "success": True,
