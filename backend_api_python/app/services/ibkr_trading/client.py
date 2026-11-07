@@ -686,6 +686,8 @@ class IBKRClient:
             _net_liq = _num("NetLiquidation")
             _cash = _num("TotalCashValue")
             _available = _num("AvailableFunds")
+            _init_margin = _num("InitMarginReq")
+            _maint_margin = _num("MaintMarginReq")
             _cur = "USD" if any(str(c).upper() == "USD" for (_, c, _v) in rows) else ""
 
             return {
@@ -699,6 +701,10 @@ class IBKRClient:
                 "available_funds": _available,
                 "availableFunds": _available,
                 "equity": _net_liq,
+                # aliases the broker-accounts KPI card reads for IBKR
+                "total_cash_value": _cash,
+                "init_margin_req": _init_margin,
+                "maint_margin_req": _maint_margin,
                 "portfolio_value": _net_liq,
                 "portfolioValue": _net_liq,
                 "net_liquidation": _net_liq,
