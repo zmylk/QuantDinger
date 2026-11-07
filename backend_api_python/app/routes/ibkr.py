@@ -256,7 +256,16 @@ def get_orders():
     try:
         client, err = _require_connected_client()
         if err is not None:
-            return err
+            ephemeral = _ephemeral_client_from_credential()
+            if ephemeral is None:
+                return err
+            try:
+                return jsonify({"success": True, "data": ephemeral.get_open_orders()})
+            finally:
+                try:
+                    ephemeral.disconnect()
+                except Exception:  # noqa: BLE001
+                    pass
 
         orders = client.get_open_orders()
         return jsonify({

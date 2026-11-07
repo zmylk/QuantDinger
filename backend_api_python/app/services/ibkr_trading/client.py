@@ -485,8 +485,21 @@ class IBKRClient:
         try:
             self._ensure_connected()
             
-            request_all = getattr(self._ib, "reqAllOpenOrders", None)
-            trades = list(request_all() or []) if callable(request_all) else list(self._ib.openTrades() or [])
+            # reqAllOpenOrders() waits for OpenOrderEnd with no timeout; on some
+            # TWS builds that event never arrives and the HTTP request hangs.
+            # Fire the low-level request and harvest whatever lands in time.
+            try:
+                self._ib.client.reqAllOpenOrders()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("reqAllOpenOrders failed: %s", exc)
+            deadline = time.monotonic() + 2.0
+            trades = list(self._ib.openTrades() or [])
+            while not trades and time.monotonic() < deadline:
+                try:
+                    self._ib.waitOnUpdate(timeout=0.4)
+                except Exception:  # noqa: BLE001
+                    break
+                trades = list(self._ib.openTrades() or [])
             requested = str(order_id or "").strip()
             for trade in trades:
                 candidate_ids = {
