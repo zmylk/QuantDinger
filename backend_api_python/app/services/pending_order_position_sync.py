@@ -59,6 +59,19 @@ AlpacaClient = None
 _POSITION_SYNC_FD_BACKOFF_UNTIL = 0.0
 
 
+
+_TRANSIENT_CONN_TOKENS = (
+    "failed to connect",
+    "connect call failed",
+    "connection refused",
+    "errno 111",
+    "timed out",
+    "timeout",
+    "not connected",
+    "peer closed connection",
+    "already in use",
+)
+
 def _record_flat_leg_ownership_state(
     *,
     strategy_id: int,
@@ -599,7 +612,12 @@ class PendingOrderPositionSyncMixin:
                         client = create_client(exchange_config, market_type=market_type)
                     except Exception as e:
                         msg = str(e)
-                        if is_fatal_exchange_error(msg):
+                        # Connection-level failures are transient (TWS/Gateway restarts
+                        # daily, ports flap). Auto-stopping on the first blip killed
+                        # live strategies; retry on the next cycle instead.
+                        if is_fatal_exchange_error(msg) and not any(
+                            tok in msg.lower() for tok in _TRANSIENT_CONN_TOKENS
+                        ):
                             logger.error(
                                 "[PositionSync] Strategy %s fatal client error; auto-stopping. error=%s",
                                 sid,
