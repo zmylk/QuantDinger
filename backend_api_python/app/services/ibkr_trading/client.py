@@ -5,6 +5,7 @@ Uses ib_insync library to connect to TWS or IB Gateway for trading.
 """
 
 import threading
+import time
 import asyncio
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List
@@ -587,6 +588,60 @@ class IBKRClient:
 
     # ==================== Query Methods ====================
     
+    _SUMMARY_TAGS = (
+        "AccountType,NetLiquidation,TotalCashValue,AvailableFunds,BuyingPower,"
+        "EquityWithLoanValue,GrossPositionValue,ExcessLiquidity,SMA,RegTEquity,"
+        "RegTMargin,InitMarginReq,MaintMarginReq,FullInitMarginReq,FullMaintMarginReq,"
+        "FullAvailableFunds,FullExcessLiquidity,Cushion,AccruedCash,Leverage,"
+        "DayTradesRemaining"
+    )
+
+    def _account_summary_bounded(self, timeout: float = 6.0) -> List[Any]:
+        """Return account summary values without blocking forever.
+
+        ib_insync's ``accountSummary()`` waits for ``AccountSummaryEnd`` with no
+        timeout. On multi-account logins TWS sometimes never sends it, which
+        made HTTP requests (account overview / IBKR panel) hang until the client
+        gave up. Request the tags directly and harvest whatever arrived within
+        the deadline; cached values are reused once populated.
+        """
+        ib = self._ib
+
+        def _cached():
+            values = list(getattr(getattr(ib, "wrapper", None), "acctSummary", {}).values())
+            if self._account:
+                values = [v for v in values if str(getattr(v, "account", "")) == self._account]
+            return values
+
+        cached = []
+        try:
+            cached = _cached()
+        except Exception:  # noqa: BLE001
+            cached = []
+        if cached:
+            return cached
+
+        try:
+            ib.client.reqAccountSummary(1, "All", self._SUMMARY_TAGS)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("reqAccountSummary failed: %s", exc)
+            return []
+
+        deadline = time.monotonic() + max(1.0, float(timeout))
+        values: List[Any] = []
+        while time.monotonic() < deadline:
+            try:
+                ib.waitOnUpdate(timeout=0.5)
+            except Exception:  # noqa: BLE001
+                break
+            try:
+                values = _cached()
+            except Exception:  # noqa: BLE001
+                values = []
+            if values:
+                break
+        return values
+
     def get_account_summary(self) -> Dict[str, Any]:
         """
         Get account summary.
@@ -597,7 +652,7 @@ class IBKRClient:
         try:
             self._ensure_connected()
             
-            summary = self._ib.accountSummary(self._account)
+            summary = self._account_summary_bounded()
             result = {}
             rows = []
             for item in summary:
